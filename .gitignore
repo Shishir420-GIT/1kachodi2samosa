@@ -1,0 +1,12 @@
+node_modules/
+dist/
+apps/web/build/
+.venv/
+.env
+.env.*
+!.env.example
+**/.react-router/
+__pycache__/
+.pytest_cache/
+.DS_Store
+app.tar.gz

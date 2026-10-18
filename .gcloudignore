@@ -1,0 +1,14 @@
+.git
+node_modules
+**/node_modules
+.venv
+dist
+apps/web/build
+.env
+.env.*
+**/.env*
+**/.react-router
+**/__pycache__
+.pytest_cache
+app.tar.gz
+.DS_Store
