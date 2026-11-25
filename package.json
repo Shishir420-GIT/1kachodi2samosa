@@ -7,7 +7,6 @@
     "setup": "npm install",
     "dev": "concurrently --kill-others --raw \"npm run dev --prefix apps/web\"",
     "build": "concurrently --raw \"npm run build --prefix apps/web\"",
-    "start": "python3 scripts/start.py",
     "lint": "concurrently --raw \"npm run lint --prefix apps/web\"",
     "typecheck": "concurrently --raw \"npm run typecheck --prefix apps/web\""
   },

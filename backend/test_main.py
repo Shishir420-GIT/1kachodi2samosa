@@ -103,7 +103,6 @@ def test_story_demo_is_queued_and_stored(monkeypatch):
 @pytest.mark.parametrize('changes', [
     {'consent_publication': False},
     {'body': 'Short'},
-    {'body': 'Please contact me at person@example.com because this text is otherwise long enough.'},
     {'topic': 'invalid'},
 ])
 def test_story_rejects_unsafe_or_invalid_input(monkeypatch, changes):
@@ -118,15 +117,47 @@ def test_live_story_uses_two_agents_and_never_publishes(monkeypatch):
     called = []
     async def fake_generate(name, instruction, schema, payload):
         called.append(name)
-        if name == 'story_moderator': return main.StoryModeration(decision='pending', note='Review this.')
+        if name == 'story_privacy_guard': return main.StoryPrivacyReview(decision='pending',
+            redacted_title=payload['title'], redacted_body=payload['body'], pii_detected=False,
+            pii_categories=[], note='Review this.')
         return main.StoryInsight(summary='A pattern.', friend_action='Ask what support is wanted.')
-    async def fake_store(req, moderation, insight):
-        assert moderation.decision == 'pending'
+    async def fake_store(req, privacy, insight):
+        assert privacy.decision == 'pending'
     monkeypatch.setattr(main, 'generate', fake_generate)
     monkeypatch.setattr(main, 'store_story', fake_store)
     response = client.post('/stories', json={'title': 'A moment', 'body': 'This is an anonymous account with enough detail to meet the minimum story length.', 'topic': 'other', 'consent_publication': True})
     assert response.status_code == 200
-    assert called == ['story_moderator', 'support_insight_writer']
+    assert called == ['story_privacy_guard', 'support_insight_writer']
+
+def test_story_pii_is_redacted_before_storage_and_insight(monkeypatch):
+    monkeypatch.setenv('AI_MODE', 'live')
+    stored = []
+    insight_payloads = []
+    async def fake_generate(name, instruction, schema, payload):
+        if name == 'story_privacy_guard':
+            assert 'person@example.com' not in payload['body']
+            return main.StoryPrivacyReview(decision='pending', redacted_title='A workplace moment',
+                redacted_body='A colleague at a workplace ignored a boundary, and I wished a friend had intervened.',
+                pii_detected=True, pii_categories=['name', 'workplace_or_school'], note='Identifiers removed.')
+        insight_payloads.append(payload)
+        return main.StoryInsight(summary='A boundary was ignored.', friend_action='Name the behaviour and ask what support is wanted.')
+    async def fake_store(req, privacy, insight): stored.append(privacy)
+    monkeypatch.setattr(main, 'generate', fake_generate)
+    monkeypatch.setattr(main, 'store_story', fake_store)
+    response = client.post('/stories', json={'title': 'A workplace moment',
+        'body': 'Email person@example.com about a colleague who ignored a boundary at a workplace.',
+        'topic': 'workplace', 'consent_publication': True})
+    assert response.status_code == 200
+    assert response.json()['privacy']['pii_removed'] is True
+    assert 'person@example.com' not in stored[0].redacted_body
+    assert insight_payloads[0]['body'] == stored[0].redacted_body
+
+def test_obvious_pii_scrubber_covers_contact_links_and_handles():
+    redacted, categories = main.redact_obvious_pii('Email me@example.com, call +91 98765 43210, see https://example.com or @handle.')
+    assert 'example.com' not in redacted
+    assert '98765' not in redacted
+    assert '@handle' not in redacted
+    assert categories == {'contact', 'handle', 'link'}
 
 def reminder_config(monkeypatch):
     values = {'SUPABASE_URL': 'https://example.supabase.co', 'SUPABASE_SECRET_KEY': 'secret', 'RESEND_API_KEY': 'resend', 'REMINDER_FROM_EMAIL': 'practice@example.com', 'PUBLIC_SITE_URL': 'https://example.com', 'UNSUBSCRIBE_SIGNING_SECRET': 'a' * 32}
@@ -146,3 +177,28 @@ def test_reminder_due_window_respects_timezone_and_daily_limit():
     assert reminders.is_due(pref, now) == (True, '2026-10-18')
     pref['last_sent_at'] = '2026-10-18T03:31:00+00:00'
     assert reminders.is_due(pref, now)[0] is False
+
+def test_backend_secret_blocks_direct_public_callers(monkeypatch):
+    monkeypatch.setenv('BACKEND_SHARED_SECRET', 'expected-secret')
+    assert client.post('/respond', json={'message': 'Hello there.'}).status_code == 401
+    r = client.post('/respond', json={'message': 'Hello there.'}, headers={'x-backend-secret': 'expected-secret'})
+    assert r.status_code == 200
+
+def test_backend_secret_is_optional_when_unset(monkeypatch):
+    monkeypatch.delenv('BACKEND_SHARED_SECRET', raising=False)
+    assert client.post('/respond', json={'message': 'Hello there.'}).status_code == 200
+
+def test_cron_reminders_requires_bearer_secret(monkeypatch):
+    monkeypatch.delenv('CRON_SECRET', raising=False)
+    assert client.post('/cron/reminders').status_code == 503
+    monkeypatch.setenv('CRON_SECRET', 'cron-secret')
+    assert client.post('/cron/reminders').status_code == 401
+    assert client.post('/cron/reminders', headers={'authorization': 'Bearer wrong'}).status_code == 401
+
+def test_cron_reminders_runs_with_correct_secret(monkeypatch):
+    reminder_config(monkeypatch)
+    monkeypatch.setenv('CRON_SECRET', 'cron-secret')
+    monkeypatch.setattr(main, 'run_reminders', lambda send: {'sent': 0, 'checked': 0})
+    r = client.post('/cron/reminders', headers={'authorization': 'Bearer cron-secret'})
+    assert r.status_code == 200
+    assert r.json() == {'sent': 0, 'checked': 0}

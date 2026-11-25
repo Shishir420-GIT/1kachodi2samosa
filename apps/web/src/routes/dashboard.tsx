@@ -23,7 +23,6 @@ const milestone = (points: number) => points >= 12 ? ['Showing up', 12, 18] : po
 export default function DashboardPage() {
   const [client, setClient] = useState<SupabaseClient | null>(null);
   const [user, setUser] = useState<User | null>(null);
-  const [email, setEmail] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [commitments, setCommitments] = useState<Commitment[]>([]);
@@ -65,11 +64,6 @@ export default function DashboardPage() {
     return () => { mounted = false; unsubscribe?.(); };
   }, [refresh]);
 
-  async function signIn(event: React.FormEvent) {
-    event.preventDefault(); if (!client) return;
-    const { error } = await client.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin + '/dashboard' } });
-    setMessage(error ? error.message : 'Check your email for a sign-in link.');
-  }
   async function saveReminder(event: React.FormEvent) {
     event.preventDefault(); if (!client || !user) return;
     const row = { user_id: user.id, ...reminder, local_time: `${reminder.local_time}:00`, consented_at: reminder.enabled ? new Date().toISOString() : null, updated_at: new Date().toISOString() };
@@ -97,14 +91,14 @@ export default function DashboardPage() {
 
   return <><SiteHeader/><main className="app-page">
     <section className="page-intro"><p className="eyebrow">YOUR PRIVATE PRACTICE</p><h1>Small actions.<br/><em>A visible pattern.</em></h1><p>Track the work without turning respect into a morality score. Share only simple check-ins with people you choose.</p></section>
-    {!user ? <section className="auth-gate paper-panel"><ShieldCheck size={35}/><p className="eyebrow">PASSWORDLESS · PRIVATE BY DEFAULT</p><h2>Open your path.</h2><p>We’ll email a secure sign-in link. Practice remains available without an account.</p><form onSubmit={signIn}><label htmlFor="dashboard-email">Email address</label><input id="dashboard-email" type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com"/><button className="primary-link" disabled={!client}>Email my sign-in link <ArrowRight size={17}/></button></form></section> : <>
+    {!user ? <section className="auth-gate paper-panel"><ShieldCheck size={35}/><p className="eyebrow">PRIVATE BY DEFAULT · GOOGLE SIGN-IN</p><h2>Open your path.</h2><p>Sign in to keep progress, reminders and circle check-ins together. Practice remains available without an account.</p><a className="primary-link" href="/auth?next=/dashboard">Choose how to continue <ArrowRight size={17}/></a></section> : <>
       <section className="progress-hero paper-panel"><div><p className="eyebrow">CURRENT MILESTONE</p><h2>{level}</h2><p>{points} practice points · {commitments.length} saved action{commitments.length === 1 ? '' : 's'}</p></div><div className="progress-ring" style={{ '--progress': `${percent * 3.6}deg` } as React.CSSProperties}><span>{percent}%</span></div></section>
       <div className="dashboard-grid">
         <section className="paper-panel"><Bell/><p className="eyebrow">A GENTLE NUDGE</p><h2>Daily reminder</h2><form className="stack-form" onSubmit={saveReminder}><label className="check-label"><input type="checkbox" checked={reminder.enabled} onChange={e => setReminder({ ...reminder, enabled: e.target.checked })}/> Send me one daily practice reminder</label><label>Local time<input type="time" value={reminder.local_time} onChange={e => setReminder({ ...reminder, local_time: e.target.value })}/></label><label>Timezone<input value={reminder.timezone} onChange={e => setReminder({ ...reminder, timezone: e.target.value })} maxLength={64}/></label><button className="text-link">Save reminder <ArrowRight size={16}/></button></form><p className="fine-print">You can turn this off anytime. The scheduled sender will begin after the email domain is verified.</p></section>
         <section className="paper-panel"><Users/><p className="eyebrow">ACCOUNTABILITY, WITH BOUNDARIES</p><h2>Your circles</h2><p>Members see names and daily check-ins. They never see your practice text or private takeaways.</p><label className="shared-name">Your circle name<input value={displayName} onChange={e => setDisplayName(e.target.value)} minLength={2} maxLength={40}/></label><div className="circle-actions"><form onSubmit={createCircle}><label>Start a circle<input value={circleName} onChange={e => setCircleName(e.target.value)} placeholder="Sunday check-in" minLength={2} maxLength={50} required/></label><button className="text-link">Create <ArrowRight size={16}/></button></form><form onSubmit={joinCircle}><label>Join with a code<input value={inviteCode} onChange={e => setInviteCode(e.target.value.toUpperCase())} placeholder="AB12CD34" required/></label><button className="text-link">Join <ArrowRight size={16}/></button></form></div></section>
       </div>
       <section className="circle-list">{circles.map(circle => { const checked = circle.circle_checkins?.some(c => c.user_id === user.id && c.checkin_date === today()); return <article className="circle-card" key={circle.id}><div><p className="eyebrow">{circle.circle_members?.length || 1} MEMBER{circle.circle_members?.length === 1 ? '' : 'S'}</p><h3>{circle.name}</h3><p>{circle.circle_members?.map(m => m.display_name).join(' · ')}</p></div><div className="invite-code"><span>INVITE CODE</span><strong>{circle.invite_code}</strong><button aria-label="Copy invite code" onClick={() => { void navigator.clipboard.writeText(circle.invite_code); setMessage('Invite code copied.'); }}><Copy size={16}/></button></div><button className="primary-link" disabled={checked} onClick={() => checkIn(circle.id)}>{checked ? <><Check size={17}/> Checked in today</> : <>Check in today <ArrowRight size={17}/></>}</button></article>; })}{!loading && circles.length === 0 && <p className="empty-note">Create a circle for two or more people, or join one with an invite code.</p>}</section>
-      <button className="text-link sign-out" onClick={() => client?.auth.signOut()}><LogOut size={16}/> Sign out</button>
+      <a className="text-link sign-out" href="/logout"><LogOut size={16}/> Sign out</a>
     </>}
     {loading && <p className="page-status">Loading your path…</p>}<p className="page-status" role="status">{message}</p>
   </main><SiteFooter/></>;

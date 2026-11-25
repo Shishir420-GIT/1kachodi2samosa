@@ -23,7 +23,6 @@ export function PracticeStudio() {
   const [urgent, setUrgent] = useState(false);
   const [aiMode, setAiMode] = useState('loading');
   const [saved, setSaved] = useState<Saved[]>([]);
-  const [email, setEmail] = useState('');
   const [userId, setUserId] = useState<string | null>(null);
   const [authNote, setAuthNote] = useState('');
   const [client, setClient] = useState<SupabaseClient | null>(null);
@@ -36,9 +35,9 @@ export function PracticeStudio() {
   useEffect(() => {
     let active = true; let unsubscribe: (() => void) | undefined;
     try { const items = JSON.parse(localStorage.getItem(STORAGE) || '[]'); if (Array.isArray(items)) setSaved(items.filter(x => typeof x.action === 'string' && typeof x.id === 'string').slice(0, 30)); } catch { /* Storage may be unavailable in private mode. */ }
-    fetch('/api/config').then(r => r.json()).then(config => {
+    Promise.all([fetch('/api/config').then(r => r.json()), fetch('/api/health').then(r => r.json()).catch(() => null)]).then(([config, health]) => {
       if (!active) return;
-      setAiMode(config.aiMode);
+      setAiMode(health?.ai_provider_status || config.aiMode);
       if (config.supabase) {
         const sb = createClient(config.supabase.url, config.supabase.key);
         setClient(sb);
@@ -90,11 +89,6 @@ export function PracticeStudio() {
       setSaveNote(error ? (local ? 'Saved on this device. Cloud sync failed.' : 'Cloud sync failed; this takeaway will last only for this visit.') : 'Saved to your account.');
     } else setSaveNote(local ? 'Saved on this device.' : 'Saved for this visit only; browser storage is unavailable.');
   }
-  async function signIn(event: React.FormEvent) {
-    event.preventDefault(); if (!client) return;
-    const { error } = await client.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin + '/#practice' } });
-    setAuthNote(error ? error.message : 'Check your email for a sign-in link.');
-  }
   async function clearSaved() {
     if (client && userId) {
       const { error } = await client.from('commitments').delete().eq('user_id', userId);
@@ -106,7 +100,7 @@ export function PracticeStudio() {
   return <section className="practice-studio section-rail" id="practice" aria-labelledby="practice-title">
     <span className="vertical-label">SMALL WORDS. REAL RESPONSIBILITY.</span>
     <div className="section-heading"><div><p className="eyebrow">04 / PUT IT INTO WORDS</p><h2 id="practice-title">Good intentions.<br/><em>Now say something.</em></h2></div><p>A little practice for the<br/>moments that matter.</p></div>
-    <div className="studio-topline"><span className="studio-status"><span className="status-dot"/>{aiMode === 'live' ? 'AI practice enabled' : aiMode === 'demo' ? 'Scripted preview · AI not connected' : aiMode === 'loading' ? 'Connecting to the studio…' : 'Connection unavailable'}</span><span>ENGLISH · ABOUT 3 MINUTES · NO ACCOUNT NEEDED</span></div>
+    <div className="studio-topline"><span className="studio-status"><span className="status-dot"/>{aiMode === 'verified' ? 'Gemini live call verified' : aiMode === 'configured' ? 'Gemini configured · awaiting a live check' : aiMode === 'degraded' ? 'Gemini unavailable · labelled fallback active' : aiMode === 'demo' ? 'Scripted preview · AI not connected' : aiMode === 'loading' ? 'Checking the AI provider…' : 'Connection unavailable'}</span><span>ENGLISH · ABOUT 3 MINUTES · NO ACCOUNT NEEDED</span></div>
     <div className="studio-tabs" aria-label="Choose an experience"><button disabled={busy} aria-pressed={mode === 'practice'} onClick={() => reset(selected, 'practice')}><MessageCircle size={18}/> Practise a conversation</button><button disabled={busy} aria-pressed={mode === 'helper'} onClick={() => reset(selected, 'helper')}><BookOpen size={18}/> Help me respond</button></div>
     <div className="studio-grid">
       <aside className="scenario-shelf"><p className="eyebrow">CHOOSE YOUR MOMENT</p>{scenes.map((s, i) => <button key={s.id} disabled={busy} className={`scenario-card ${selected === i ? 'selected' : ''}`} aria-pressed={selected === i} onClick={() => reset(i)}><span className="scenario-number">0{i + 1}</span><span><small>{s.tag}</small><strong>{s.title}</strong></span><ArrowUpRight size={20}/></button>)}<div className="studio-principle"><ShieldCheck size={24}/><p>Practice, not a personality test. No virtue scores. No medals for basic respect.</p></div></aside>
@@ -124,7 +118,7 @@ export function PracticeStudio() {
         {result && <details className="workflow-details"><summary>How this response was made</summary><p>{result.workflow.join(' → ')}</p><p>{result.model ? `Google ADK 2.9 · ${result.model}. AI can make mistakes. Source links provide context, not expert endorsement.` : 'Prewritten guidance. No AI assessment was performed.'}</p></details>}
       </div>
     </div>
-    <div className="practice-notebook"><div><p className="eyebrow">YOUR POCKET REMINDERS</p><h3>Take it off <em>the internet.</em></h3><p>{saved.length ? `${saved.length} saved takeaway${saved.length === 1 ? '' : 's'}. A reminder, not a measure of your character.` : 'Your saved actions will appear here. Start with one small thing.'}</p>{saved.length > 0 && <><ul>{saved.slice(0, 5).map(item => <li key={item.id}><Check size={17}/>{item.action}</li>)}</ul><button className="text-link" onClick={clearSaved}>Clear saved takeaways</button></>}</div><div className="progress-account">{client ? userId ? <><p>Signed in. New takeaways and practice milestones sync to your account.</p><a className="text-link" href="/dashboard">Open my path <ArrowRight size={17}/></a><button className="text-link" onClick={async () => { await client.auth.signOut(); setSaved([]); try { localStorage.removeItem(STORAGE); } catch {} setAuthNote('Signed out.'); }}>Sign out</button></> : <form onSubmit={signIn}><label htmlFor="progress-email">Keep new takeaways across devices</label><p>Optional email sign-in. You can keep practising without it.</p><input id="progress-email" type="email" required placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)}/><button className="text-link" type="submit">Email me a sign-in link <ArrowRight size={17}/></button></form> : <><Bookmark size={24}/><p>Saved on this browser. Account sync will be available when connected.</p></>}<p role="status">{authNote}</p></div></div>
+    <div className="practice-notebook"><div><p className="eyebrow">YOUR POCKET REMINDERS</p><h3>Take it off <em>the internet.</em></h3><p>{saved.length ? `${saved.length} saved takeaway${saved.length === 1 ? '' : 's'}. A reminder, not a measure of your character.` : 'Your saved actions will appear here. Start with one small thing.'}</p>{saved.length > 0 && <><ul>{saved.slice(0, 5).map(item => <li key={item.id}><Check size={17}/>{item.action}</li>)}</ul><button className="text-link" onClick={clearSaved}>Clear saved takeaways</button></>}</div><div className="progress-account">{client ? userId ? <><p>Signed in. New takeaways and practice milestones sync to your account.</p><a className="text-link" href="/dashboard">Open my path <ArrowRight size={17}/></a><button className="text-link" onClick={async () => { await client.auth.signOut(); setSaved([]); try { localStorage.removeItem(STORAGE); } catch {} setAuthNote('Signed out.'); }}>Sign out</button></> : <><label>Keep new takeaways across devices</label><p>Optional Google sign-in. You can keep practising without it.</p><a className="text-link" href="/auth?next=/dashboard">Continue with Google <ArrowRight size={17}/></a></> : <><Bookmark size={24}/><p>Saved on this browser. Account sync will be available when connected.</p></>}<p role="status">{authNote}</p></div></div>
     <p className="studio-footnote">An educational practice tool, not an emergency service. AI responses may be imperfect. You can stop any scenario. When AI is enabled, what you type is sent to Google to generate a response.</p>
   </section>;
 }

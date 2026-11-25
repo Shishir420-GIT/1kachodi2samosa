@@ -1,4 +1,5 @@
 import { apiError, json, withApi } from '@/lib/api.server';
+import { backendFetch } from '@/lib/backend.server';
 import { clientIdentifier, createRateLimiter } from '@/lib/rate-limit.server';
 
 const storyBudget = createRateLimiter({ maxRequests: 5, windowSeconds: 60 * 60 });
@@ -14,7 +15,7 @@ export const action = withApi(async ({ request }) => {
   try {
     const body = await request.text();
     if (Buffer.byteLength(body) > 5000) return apiError(413, 'Story too long');
-    const response = await fetch('http://127.0.0.1:8000/stories', {
+    const response = await backendFetch('/stories', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(40000),
     });
     const data = await response.json();

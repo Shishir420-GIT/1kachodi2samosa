@@ -6,7 +6,7 @@ type SitemapEntry = {
 	lastmod?: string;
 };
 
-const STATIC_PATHS = ['/', '/stories'];
+const STATIC_PATHS = ['/', '/guide', '/check', '/practice', '/stories', '/resources', '/ai'];
 
 function escapeXml(value: string): string {
 	return value

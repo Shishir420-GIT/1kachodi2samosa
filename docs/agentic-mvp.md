@@ -6,7 +6,7 @@
 2. The ADK coach turns their wording into a specific reflection and action; the separate practice-partner agent provides bounded role-play.
 3. A signed-in user saves the action and earns practice points. Milestone names describe activity, never character or virtue.
 4. The user can opt into one daily reminder and share only a daily check-in with a small accountability circle. Raw practice text and private takeaways are never shared with the circle.
-5. Anyone can submit an anonymous story. A safety-moderation agent checks it, a support-insight agent drafts what a friend could have done, and the story remains pending until human review.
+5. Anyone can submit a story. Obvious contacts are removed locally, a privacy agent removes contextual identifiers and moderates it, a second scrub runs, and a support-insight agent receives only sanitized text. The story remains pending until human review.
 
 ## Agent boundaries
 
@@ -14,8 +14,8 @@
 | --- | --- | --- | --- |
 | Response coach | Bounded scenario, up to four turns, allowlisted guidance | Structured reflection, revised words and next action | No |
 | Practice partner | Same fictional scenario and validated coach result | One short fictional reply | No |
-| Story moderator | Anonymous title, story and topic | `pending` or `reject` with an internal note | No |
-| Support insight writer | A moderator-accepted story | Pattern summary and one practical friend action | No |
+| Story privacy guard | Locally scrubbed title, story and topic | Sanitized title/body, PII categories, and `pending` or `reject` | No |
+| Support insight writer | Privacy-guarded sanitized story only | Pattern summary and one practical friend action | No |
 
 All live model calls use per-request in-memory ADK sessions. The application does not persist raw practice conversations. Public story publishing is a human decision made in Supabase by changing a reviewed row from `pending` to `published` and setting `published_at`.
 
@@ -24,7 +24,7 @@ All live model calls use per-request in-memory ADK sessions. The application doe
 - Browser code receives only the Supabase URL and publishable key. RLS limits signed-in rows.
 - The Supabase secret key stays in the Python service and is used only to place anonymous stories into the review queue and, later, deliver opted-in reminders.
 - Circle members can see circle membership and daily check-ins. They cannot query another member's commitments or practice events.
-- Story submissions reject obvious contact details before model processing and are rate-limited by the web server.
+- Story submissions remove obvious contact details before model processing, apply a second scrub afterward, store only sanitized text, and are rate-limited by the web server.
 - Emergency language stops role-play. The product does not diagnose, report incidents, dispatch help or invent local services.
 
 ## Demo path

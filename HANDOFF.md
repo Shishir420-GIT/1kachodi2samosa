@@ -1,80 +1,48 @@
 # Dear Men handoff memory
 
-Last updated: 18 October 2026, Asia/Kolkata.
+Last updated: 25 November 2026.
 
-## Current verified state
+## Current state
 
-- Workspace: `/Users/shishir/Workspace/AI-Builder-Cup/horizons-export-c4055a00-722e-4a5b-9202-4dcaafaac043`
-- Local app: `http://127.0.0.1:8080`
-- Stack: React Router SSR, FastAPI, Google ADK 2.9.0, Supabase and Resend.
-- Google ADK is live through the Gemini Developer API. A restricted Gemini-only key is stored in ignored `.env`; never copy it into docs, source, chat or browser code.
-- A real practice request completed the coach → practice partner flow with validated structured output.
-- A real fictional story completed moderator → support insight → human review queue. Its temporary database row was deleted after verification.
-- Health after verification: `AI_MODE=live`, ADK 2.9.0, daily model-call limit 100.
-- Supabase migrations are applied. All six agentic tables responded, and the story wall displays two seeded composite examples.
-- Resend verified `reminders.1kachodi2samosa.in`. The configured sender on that subdomain was accepted with HTTP 200 using Resend's synthetic `delivered@resend.dev` address. No real recipient was contacted during verification.
-- Signed unsubscribe tokens and the `/unsubscribe` flow pass locally.
-- Validation: 22 backend tests pass; frontend lint, typecheck and production build pass.
+- Branch: `vercel-version`. Deployment target migrated from Google Cloud Run to **Vercel**, as two separate Vercel projects (same repo, different Root Directories — see `README.md`).
+- Stack unchanged otherwise: React Router SSR (`apps/web`), FastAPI + Google ADK 2.9.0 (`backend/`), Supabase, Resend.
+- The frontend's `/api/*` resource routes no longer call a co-located `http://127.0.0.1:8000` process. They call `BACKEND_API_URL` (via `apps/web/src/lib/backend.server.ts`), authenticated with `BACKEND_SHARED_SECRET` so the backend's now-public URL can't be hit directly to bypass the frontend's rate limiting.
+- New `POST /cron/reminders` endpoint on the backend (protected by `Authorization: Bearer $CRON_SECRET`) replaces the Cloud Run Job + Cloud Scheduler pair. `vercel.json` declares a daily Vercel Cron trigger; the Hobby plan collapses any cron to once a day, so true per-user local-time delivery needs an external scheduler hitting the same endpoint — documented in the README and `docs/daily-email-reminders.md`.
+- Removed: `Dockerfile`, `.dockerignore`, `.gcloudignore`, `scripts/deploy.sh`, `scripts/deploy-reminders.sh`, `scripts/start.py`, `scripts/artifact-cleanup-policy.json`, and the hackathon-day working notes (`docs/submission.md`, `docs/verification.md`, `docs/demo-video-script.md`, `submission/*.pptx`) — all superseded by this migration.
+- 27 backend tests pass (23 pre-existing + 4 new for the shared-secret and cron-secret guards). Frontend `typecheck` and `build` pass. A live round trip through the full chain (Node dev server → backend secret check → ADK coach/practice-partner) was exercised locally; Gemini itself returned transient `503 UNAVAILABLE` ("high demand") during that session for every model tried, reproduced with a bare `google-genai` call outside this app — the plumbing is verified, confirming actual model output still depends on Gemini's live availability.
 
-## Cloud status and blocker
+## Required Vercel environment variables
 
-- Intended Cloud Run project in the current `.env`: `genai-cohort-2-497718`.
-- Region default: `asia-south1`.
-- Local gcloud account used: `shishir.workemail@gmail.com`.
-- gcloud active project and quota project were changed to `genai-cohort-2-497718`.
-- Cloud Run, Cloud Build and Artifact Registry APIs were already enabled.
-- Cloud deployment has **not** happened.
-- Secret Manager activation failed with `UREQ_PROJECT_BILLING_NOT_OPEN`. A billing account must be linked before `scripts/deploy.sh` can continue.
-- Do not assume `min-instances=0` guarantees a zero bill. It removes idle instance compute. Build minutes, image storage, requests, egress and usage beyond free allowances remain possible.
+Backend project (Root Directory `.`): `AI_MODE`, `GEMINI_MODEL`, `DAILY_MODEL_CALL_LIMIT`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_API_KEY`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `BACKEND_SHARED_SECRET`, `CRON_SECRET`, `RESEND_API_KEY`, `REMINDER_FROM_EMAIL`, `PUBLIC_SITE_URL`, `UNSUBSCRIBE_SIGNING_SECRET`.
 
-## Cost controls already implemented
+Frontend project (Root Directory `apps/web`): `AI_MODE`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `BACKEND_API_URL`, `BACKEND_SHARED_SECRET`.
 
-- Cloud Run: 512 MiB, one CPU, CPU throttling, startup boost disabled, min 0, max 1 at service and revision levels, concurrency 8.
-- Gemini: Developer API route, one model call per agent, 700 maximum output tokens, 100 model calls per process per UTC day.
-- API: practice budget 30/minute per process; anonymous stories 5/hour per client plus shared API limits.
-- The in-process daily model counter resets if the instance restarts. It is a safety brake, not a billing hard cap.
+`BACKEND_SHARED_SECRET` must be identical in both projects. Generate secrets with `openssl rand -hex 32`.
 
 ## Smoothest next steps
 
-1. Read `README.md`, especially “Deploy to Cloud Run.”
-2. Decide whether Cloud Run and Gemini should use separate projects. For strictly free Gemini calls, keep the Gemini key in a billing-disabled project and deploy Cloud Run from a different billing-enabled project.
-3. Link billing to the selected Cloud Run project.
-4. Confirm `.env` contains the Cloud Run project ID and the verified subdomain sender. Do not rotate working secrets unless necessary.
-5. Run `bash scripts/deploy.sh`.
-6. Put the printed Cloud Run URL into Supabase Auth Site URL and redirect allowlist.
-7. Test signed-out practice, passwordless sign-in, dashboard, circle creation, story submission and `/api/health`.
-8. Run `bash scripts/deploy-reminders.sh` only after the website and auth work.
-9. Add a small Google Cloud budget alert and record the final public URL in `docs/submission.md`.
+1. Create the backend Vercel project first (Root Directory `.`), fill its env vars, deploy, copy its URL.
+2. Create the frontend Vercel project (Root Directory `apps/web`), set `BACKEND_API_URL` to the backend's URL, fill the rest, deploy.
+3. Point Supabase Auth Site URL / redirect allowlist at the frontend's URL; enable the Google provider.
+4. `curl https://YOUR_BACKEND_URL/health` and confirm `ai_mode: live`; complete a practice on the frontend and confirm it reports `ADK coach` / `ADK practice partner`, not fallback — retry if Gemini returns a transient error.
+5. Pick a reminder cadence per the README's "Daily reminders" section (Vercel Cron alone on Hobby, or Vercel Cron + an external scheduler for true per-user timing).
+6. Add a small Google Cloud / AI Studio usage alert for the Gemini key.
 
 ## Recovery and verification commands
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=. python -m pytest -q
-npm run lint --prefix apps/web
+PYTHONPATH=. python -m pytest backend/test_main.py -q
 npm run typecheck --prefix apps/web
 npm run build --prefix apps/web
-python scripts/start.py
+# two terminals, local dev:
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env --reload
+npm run dev --prefix apps/web
 ```
 
-To inspect a deployment:
-
-```bash
-gcloud run services describe dear-men --region asia-south1
-gcloud run services logs read dear-men --region asia-south1 --limit 100
-```
-
-To halt Cloud Run resources:
-
-```bash
-gcloud run services delete dear-men --region asia-south1
-gcloud run jobs delete dear-men-reminders --region asia-south1
-gcloud scheduler jobs delete dear-men-reminders --location asia-south1
-```
-
-## Important product boundaries
+## Important product boundaries (unchanged)
 
 - Raw practice messages are not stored by this application. Live inputs are sent to Google for generation.
 - Circle members see display names and daily check-ins only. They cannot see private practice text or saved takeaways.
-- Anonymous stories never auto-publish. AI prepares moderation and support insight; a human must change a safe row from `pending` to `published`.
+- Anonymous stories never auto-publish. The privacy agent sees the submitted text to sanitize it; raw text is never stored, and the insight agent sees only sanitized text. A human must change a safe row from `pending` to `published`.
 - The product is educational. It is not an emergency, clinical, legal or reporting service.

@@ -1,4 +1,4 @@
-"""Server-only reminder delivery helpers for a scheduled Cloud Run Job."""
+"""Server-only reminder delivery helpers for POST /cron/reminders."""
 import base64
 import hashlib
 import hmac
@@ -69,7 +69,7 @@ def run(send: bool = False, now: datetime | None = None) -> dict:
             if not email: continue
             subject, practice = PROMPTS[(int(local_date.replace('-', '')) + index) % len(PROMPTS)]
             token = sign_unsubscribe(pref['user_id']); site = cfg['PUBLIC_SITE_URL'].rstrip('/')
-            body = f'<p>{html.escape(subject)}</p><p>{html.escape(practice)}</p><p><a href="{html.escape(site)}/#practice">Practise another response</a></p><p>You are receiving this because you enabled daily reminders. <a href="{html.escape(site)}/unsubscribe?token={token}">Unsubscribe</a>.</p>'
+            body = f'<p>{html.escape(subject)}</p><p>{html.escape(practice)}</p><p><a href="{html.escape(site)}/practice">Practise another response</a></p><p>You are receiving this because you enabled daily reminders. <a href="{html.escape(site)}/unsubscribe?token={token}">Unsubscribe</a>.</p>'
             sent = client.post('https://api.resend.com/emails', headers={'Authorization': f'Bearer {cfg["RESEND_API_KEY"]}', 'Idempotency-Key': f'dearmen-{pref["user_id"]}-{local_date}'}, json={'from': cfg['REMINDER_FROM_EMAIL'], 'to': [email], 'subject': 'One sentence to practise today', 'html': body})
             sent.raise_for_status()
             updated = client.patch(f'{base}/rest/v1/reminder_preferences', params={'user_id': f'eq.{pref["user_id"]}'}, headers={**_headers(secret), 'Prefer': 'return=minimal'}, json={'last_sent_at': now.isoformat(), 'updated_at': now.isoformat()})

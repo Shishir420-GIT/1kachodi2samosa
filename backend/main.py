@@ -5,10 +5,11 @@ import logging
 import os
 import re
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Literal
+import hmac
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from google.adk.agents import LlmAgent
 from google.adk.agents.run_config import RunConfig
@@ -16,13 +17,34 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from backend.reminders import disable as disable_reminder
+from backend.reminders import run as run_reminders
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+async def require_backend_secret(request: Request):
+    """On Vercel this backend has its own public URL, unlike the Cloud Run
+    loopback-only deployment. Only the frontend server (which holds the same
+    secret) may call these endpoints; the browser never sees it."""
+    expected = os.getenv('BACKEND_SHARED_SECRET', '')
+    if not expected:
+        return
+    if not hmac.compare_digest(request.headers.get('x-backend-secret', ''), expected):
+        raise HTTPException(401, 'Unauthorized')
+
+async def require_cron_secret(request: Request):
+    expected = os.getenv('CRON_SECRET', '')
+    if not expected:
+        raise HTTPException(503, 'Reminder delivery is not configured')
+    if not hmac.compare_digest(request.headers.get('authorization', ''), f'Bearer {expected}'):
+        raise HTTPException(401, 'Unauthorized')
+
 _usage_lock = asyncio.Lock()
 _usage_day = date.today()
 _model_calls_today = 0
+_last_model_success_at = None
+_last_model_error = None
 SOURCES = {
-    'field-guide': {'title': 'Dear Men · Field guide', 'url': 'https://1kachodi2samosa.in/#guide', 'note': 'Project-authored guidance: challenge the behaviour, respect a no, and avoid making someone else responsible for your learning.'},
+    'field-guide': {'title': 'Dear Men · Field guide', 'url': '/guide', 'note': 'Project-authored guidance: challenge the behaviour, respect a no, and avoid making someone else responsible for your learning.'},
     'bystander': {'title': 'Right To Be · Bystander intervention', 'url': 'https://righttobe.org/guides/bystander-intervention-training/', 'note': 'Consider indirect support such as distraction, delegation and checking in afterward. Assess safety and centre the affected person’s wishes.'},
 }
 SCENARIOS = {
@@ -54,8 +76,12 @@ class StoryRequest(BaseModel):
     topic: Literal['friends', 'workplace', 'boundaries', 'bystander', 'relationships', 'other'] = 'other'
     consent_publication: bool
     website: str = Field(default='', max_length=200)
-class StoryModeration(BaseModel):
+class StoryPrivacyReview(BaseModel):
     decision: Literal['pending', 'reject']
+    redacted_title: str = Field(min_length=1, max_length=100)
+    redacted_body: str = Field(min_length=1, max_length=1800)
+    pii_detected: bool = False
+    pii_categories: list[Literal['name', 'contact', 'handle', 'link', 'precise_location', 'workplace_or_school', 'identifier', 'other']] = Field(default_factory=list, max_length=8)
     note: str = Field(max_length=400)
 class StoryInsight(BaseModel):
     summary: str = Field(max_length=500)
@@ -102,25 +128,56 @@ def urgent_result():
         'source': SOURCES['bystander'], 'workflow': ['Practice paused'], 'model': None}
 
 async def generate(name, instruction, schema, payload):
+    global _last_model_success_at, _last_model_error
     # Per-request sessions are intentionally ephemeral, never shared between visitors.
     await reserve_model_call()
     sessions = InMemorySessionService()
     session_id = str(uuid.uuid4())
-    agent = LlmAgent(name=name, model=os.getenv('GEMINI_MODEL', 'gemini-flash-latest'),
+    agent = LlmAgent(name=name, model=os.getenv('GEMINI_MODEL', 'gemini-3.8-flash'),
         instruction=POLICY + '\n' + instruction, output_schema=schema,
-        generate_content_config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=700))
+        generate_content_config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=700,
+            thinking_config=types.ThinkingConfig(thinking_budget=0)))
     runner = Runner(agent=agent, app_name='dearmen', session_service=sessions)
     await sessions.create_session(app_name='dearmen', user_id='ephemeral', session_id=session_id)
     try:
+        result = None
         async for event in runner.run_async(user_id='ephemeral', session_id=session_id,
             new_message=types.Content(role='user', parts=[types.Part(text=json.dumps(payload))]),
             run_config=RunConfig(max_llm_calls=1)):
             if event.is_final_response() and event.content:
                 text = ''.join(p.text or '' for p in event.content.parts or [] if not p.thought)
-                return schema.model_validate_json(text)
-        raise ValueError('No structured response')
+                result = schema.model_validate_json(text)
+        if result is None:
+            raise ValueError('No structured response')
+        _last_model_success_at = datetime.now(timezone.utc).isoformat()
+        _last_model_error = None
+        return result
+    except BaseException as exc:
+        message = str(exc).lower()
+        _last_model_error = ('timeout' if isinstance(exc, asyncio.CancelledError)
+            else 'payment_required' if '402' in message or 'prepayment' in message
+            else 'rate_limited' if '429' in message or 'resource_exhausted' in message
+            else 'authentication_error' if '401' in message or '403' in message
+            else 'provider_unavailable')
+        raise
     finally:
         await runner.close()
+
+PII_PATTERNS = (
+    ('contact', re.compile(r'[\w.+-]+@[\w.-]+\.[a-z]{2,}', re.IGNORECASE)),
+    ('link', re.compile(r'(?:https?://|www\.)\S+', re.IGNORECASE)),
+    ('handle', re.compile(r'(?<!\w)@[a-z0-9_]{2,}', re.IGNORECASE)),
+    ('contact', re.compile(r'(?<!\w)\+?\d[\d\s().-]{7,}\d(?!\w)')),
+)
+
+def redact_obvious_pii(text: str):
+    categories = set()
+    redacted = text.strip()
+    for category, pattern in PII_PATTERNS:
+        redacted, count = pattern.subn('[redacted]', redacted)
+        if count:
+            categories.add(category)
+    return re.sub(r'[ \t]{2,}', ' ', redacted), categories
 
 def demo_story_review(req: StoryRequest):
     topic_actions = {
@@ -131,19 +188,27 @@ def demo_story_review(req: StoryRequest):
         'relationships': 'A trusted person could listen without interrogation, respect the person’s choices, and offer specific practical support.',
         'other': 'A friend could listen, name the concerning behaviour without blame, and ask what kind of support would be useful.',
     }
-    return StoryModeration(decision='pending', note='Queued for human review.'), StoryInsight(
+    title, title_categories = redact_obvious_pii(req.title)
+    body, body_categories = redact_obvious_pii(req.body)
+    categories = sorted(title_categories | body_categories)
+    return StoryPrivacyReview(decision='pending', redacted_title=title, redacted_body=body,
+        pii_detected=bool(categories), pii_categories=categories,
+        note='Obvious identifiers removed locally; queued for human review.'), StoryInsight(
         summary='This account describes a moment where clearer support and accountability may have changed how alone someone felt.',
         friend_action=topic_actions[req.topic],
     )
 
-async def store_story(req: StoryRequest, moderation: StoryModeration, insight: StoryInsight):
+async def store_story(req: StoryRequest, privacy: StoryPrivacyReview, insight: StoryInsight):
     url = os.getenv('SUPABASE_URL', '').rstrip('/')
     secret = os.getenv('SUPABASE_SECRET_KEY', '')
     if not url or not secret or 'YOUR_' in url or 'YOUR_' in secret:
         raise RuntimeError('Story storage is not configured')
-    row = {'title': req.title.strip(), 'body': req.body.strip(), 'topic': req.topic,
+    privacy_audit = privacy.note.strip()
+    if privacy.pii_categories:
+        privacy_audit = f"{privacy_audit} Removed identifier categories: {', '.join(privacy.pii_categories)}."
+    row = {'title': privacy.redacted_title.strip(), 'body': privacy.redacted_body.strip(), 'topic': req.topic,
         'status': 'pending', 'consent_publication': True, 'ai_summary': insight.summary,
-        'friend_action': insight.friend_action, 'moderation_note': moderation.note}
+        'friend_action': insight.friend_action, 'moderation_note': privacy_audit[:500]}
     async with httpx.AsyncClient(timeout=12) as client:
         response = await client.post(f'{url}/rest/v1/stories', json=row, headers={
             'apikey': secret, 'Authorization': f'Bearer {secret}', 'Prefer': 'return=minimal'})
@@ -152,11 +217,15 @@ async def store_story(req: StoryRequest, moderation: StoryModeration, insight: S
 
 @app.get('/health')
 def health():
-    return {'ok': True, 'ai_mode': 'live' if live_enabled() else 'demo', 'adk': '2.9.0',
+    configured = live_enabled() and bool(os.getenv('GOOGLE_API_KEY') or os.getenv('GOOGLE_GENAI_USE_VERTEXAI') == 'true')
+    provider_status = 'degraded' if _last_model_error else 'verified' if _last_model_success_at else 'configured' if configured else 'demo'
+    return {'ok': True, 'ai_mode': 'live' if live_enabled() else 'demo', 'ai_provider_status': provider_status,
+        'ai_provider_error': _last_model_error, 'last_model_success_at': _last_model_success_at,
+        'model': os.getenv('GEMINI_MODEL', 'gemini-3.8-flash'), 'adk': '2.9.0',
         'daily_model_call_limit': max(1, min(int(os.getenv('DAILY_MODEL_CALL_LIMIT', '100')), 1000)),
         'model_calls_today': _model_calls_today}
 
-@app.post('/respond')
+@app.post('/respond', dependencies=[Depends(require_backend_secret)])
 async def respond(req: PracticeRequest):
     if not req.message.strip():
         raise HTTPException(422, 'Write a response first.')
@@ -178,40 +247,50 @@ async def respond(req: PracticeRequest):
                 reply = character.reply
             return {'mode': 'live', 'character': reply, 'coaching': coach.model_dump(),
                 'source': SOURCES[coach.source_id], 'workflow': ['Scenario + guidance loaded', 'ADK coach', 'ADK practice partner' if reply else 'Response helper', 'Structured output validated'],
-                'model': os.getenv('GEMINI_MODEL', 'gemini-flash-latest')}
+                'model': os.getenv('GEMINI_MODEL', 'gemini-3.8-flash')}
     except Exception as exc:
         # Do not log conversation contents or provider error messages containing prompts.
         logging.warning('Coaching unavailable: %s', type(exc).__name__)
         return fallback(req, 'fallback')
 
-@app.post('/stories')
+@app.post('/stories', dependencies=[Depends(require_backend_secret)])
 async def submit_story(req: StoryRequest):
     if req.website:
         return {'ok': True, 'status': 'pending'}
     if not req.consent_publication:
         raise HTTPException(422, 'Publication consent is required.')
-    combined = f'{req.title} {req.body}'
-    contact_pattern = r'(?:https?://|www\.|@[a-z0-9_]{2,}|\b\+?\d[\d\s().-]{7,}\d\b|[\w.+-]+@[\w.-]+\.[a-z]{2,})'
-    if re.search(contact_pattern, combined, flags=re.IGNORECASE):
-        raise HTTPException(422, 'Remove names, handles, links and contact details before submitting.')
-    payload = {'title': req.title, 'body': req.body, 'topic': req.topic}
+    pre_title, title_categories = redact_obvious_pii(req.title)
+    pre_body, body_categories = redact_obvious_pii(req.body)
+    local_categories = title_categories | body_categories
+    payload = {'title': pre_title, 'body': pre_body, 'topic': req.topic,
+        'task': 'Remove contextual identifiers while preserving the meaning of this anonymous account.'}
     try:
         if live_enabled():
             async with asyncio.timeout(35):
-                moderation = await generate('story_moderator',
-                    'Review an anonymous story before storage. Reject content that exposes identifying details, targets a private person, contains threats, sexual content involving minors, spam, or instructions for harm. Otherwise return pending. Never return published.',
-                    StoryModeration, payload)
-                if moderation.decision == 'reject':
-                    raise HTTPException(422, 'This story cannot be accepted in its current form. Remove identifying or unsafe details and try again.')
+                privacy = await generate('story_privacy_guard',
+                    'Act as a privacy scrubber and safety moderator before storage. Rewrite title and body to remove or generalise every name, contact detail, handle, account, exact address or location, employer, school, unique job title, case or ID number, and any combination of details that could identify a private person. Use neutral replacements such as “a friend”, “a workplace”, or “[redacted]”. Preserve the event and the support that was missing. Mark pii_detected and list categories. Reject only threats, sexual content involving minors, spam, instructions for harm, or text that cannot be made safely anonymous. Otherwise return pending. Never return published.',
+                    StoryPrivacyReview, payload)
+                if privacy.decision == 'reject':
+                    raise HTTPException(422, 'This story cannot be safely accepted in its current form. Please revise it and try again.')
+                safe_title, final_title_categories = redact_obvious_pii(privacy.redacted_title)
+                safe_body, final_body_categories = redact_obvious_pii(privacy.redacted_body)
+                categories = sorted(set(privacy.pii_categories) | local_categories | final_title_categories | final_body_categories)
+                privacy = privacy.model_copy(update={'redacted_title': safe_title, 'redacted_body': safe_body,
+                    'pii_detected': bool(categories), 'pii_categories': categories})
+                if len(safe_title) < 3 or len(safe_body) < 40:
+                    raise HTTPException(422, 'Too much identifying information remained to keep this story useful. Please rewrite it more generally.')
                 insight = await generate('support_insight_writer',
-                    'Summarise the pattern without diagnosing, blaming, or inventing facts. Then suggest one concrete thing a friend could have done, centred on consent, safety and the affected person’s wishes.',
-                    StoryInsight, payload)
+                    'Using only this already-sanitized story, summarise the pattern without diagnosing, blaming, or inventing facts. Then suggest one concrete thing a friend could have done, centred on consent, safety and the affected person’s wishes. Do not reintroduce or guess identifying details.',
+                    StoryInsight, {'title': privacy.redacted_title, 'body': privacy.redacted_body, 'topic': req.topic})
         else:
-            moderation, insight = demo_story_review(req)
-        await store_story(req, moderation, insight)
-        return {'ok': True, 'status': 'pending', 'workflow': [
-            'Submission checked',
-            'ADK safety moderator' if live_enabled() else 'Local safety checks',
+            privacy, insight = demo_story_review(req)
+        await store_story(req, privacy, insight)
+        return {'ok': True, 'status': 'pending', 'privacy': {
+            'pii_removed': privacy.pii_detected, 'categories': privacy.pii_categories,
+        }, 'workflow': [
+            'Local contact scrub',
+            'ADK privacy guard + safety moderator' if live_enabled() else 'Local privacy checks',
+            'Sanitized story only',
             'ADK support insight' if live_enabled() else 'Scripted support insight',
             'Human review queue',
         ]}
@@ -221,7 +300,7 @@ async def submit_story(req: StoryRequest):
         logging.warning('Story submission unavailable: %s', type(exc).__name__)
         raise HTTPException(503, 'Story submission is temporarily unavailable.')
 
-@app.post('/reminders/unsubscribe')
+@app.post('/reminders/unsubscribe', dependencies=[Depends(require_backend_secret)])
 async def unsubscribe(req: UnsubscribeRequest):
     try:
         await asyncio.to_thread(disable_reminder, req.token)
@@ -231,3 +310,14 @@ async def unsubscribe(req: UnsubscribeRequest):
     except Exception as exc:
         logging.warning('Unsubscribe unavailable: %s', type(exc).__name__)
         raise HTTPException(503, 'Unsubscribe is temporarily unavailable.')
+
+@app.post('/cron/reminders', dependencies=[Depends(require_cron_secret)])
+async def cron_reminders():
+    """Triggered by Vercel Cron (daily, Hobby-plan limit) or by an external
+    scheduler hitting this URL with `Authorization: Bearer $CRON_SECRET` for
+    finer-grained cadence. Replaces the old Cloud Run Job + Cloud Scheduler pair."""
+    try:
+        return await asyncio.to_thread(run_reminders, send=True)
+    except Exception as exc:
+        logging.warning('Reminder run failed: %s', type(exc).__name__)
+        raise HTTPException(503, 'Reminder delivery is temporarily unavailable.')

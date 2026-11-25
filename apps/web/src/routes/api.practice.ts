@@ -1,4 +1,5 @@
 import { apiError, json, withApi } from '@/lib/api.server';
+import { backendFetch } from '@/lib/backend.server';
 import { createRateLimiter } from '@/lib/rate-limit.server';
 // Global per-process budget cannot be bypassed by spoofing forwarding headers.
 // Cloud Run deployment caps instances; a distributed quota is needed at larger scale.
@@ -23,7 +24,7 @@ export const action = withApi(async ({ request }) => {
   } finally { reader.releaseLock(); }
   try {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    const response = await fetch('http://127.0.0.1:8000/respond', {
+    const response = await backendFetch('/respond', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(40000),
     });
     if (!response.ok) return apiError(response.status === 422 ? 400 : 503, 'Check your response and try again.');
